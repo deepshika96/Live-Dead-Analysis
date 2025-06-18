@@ -1,0 +1,116 @@
+"""
+DAPI+ Cell Size Estimation from .LIF Z-stacks
+---------------------------------------------
+
+This script analyzes DAPI-stained nuclei in randomly selected patches from a 
+multi-channel LIF file. It segments the DAPI+ cells using the CellSAM pipeline 
+to estimate the average size and intensity of single cells.
+
+Steps:
+- Load LIF image and compute max-intensity projections (MIPs)
+- Randomly extract 500x500 patches (non-overlapping)
+- Segment each patch using CellSAM
+- Measure total intensity from Channel 0 in segmented regions
+- Save mask previews and export results to Excel
+
+Author: Deepshika Arasu
+Date: 2025-05-15
+"""
+
+import os
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import tifffile
+from readlif.reader import LifFile
+from cellSAM import segment_cellular_image
+
+# === Load LIF File ===
+lif_file = LifFile("path to LIF")
+image = lif_file.get_image(0)  # Select specific image (e.g., BP3a-6f)
+z_dim = image.dims.z
+height, width = image.dims.y, image.dims.x
+
+# === Compute Max-Intensity Projections (MIPs) ===
+def compute_mip(channel):
+    """Compute max-intensity projection for a given channel."""
+    z_stack = [np.array(image.get_frame(t=0, c=channel, z=z)) for z in range(z_dim)]
+    return np.max(np.stack(z_stack), axis=0)
+
+mip_ch0 = compute_mip(0)  # Presumed DAPI channel for intensity
+mip_ch1 = compute_mip(1)  # Presumed DAPI channel for segmentation
+
+# === Patch Extraction & Analysis Settings ===
+patch_size = 500
+results = []
+masks_dir = "/kaggle/working/okcellsam_masks"
+os.makedirs(masks_dir, exist_ok=True)
+
+attempts = 0
+selected_coords = []
+patch_index = 0
+
+# === Random Non-Overlapping Patch Selection and Processing ===
+while len(selected_coords) < 4 and attempts < 100:
+    x = random.randint(0, width - patch_size)
+    y = random.randint(0, height - patch_size)
+
+    # Skip overlapping regions
+    overlap = any(abs(x - px) < patch_size and abs(y - py) < patch_size for px, py in selected_coords)
+    if overlap:
+        attempts += 1
+        continue
+
+    selected_coords.append((x, y))
+    patch_ch1 = mip_ch1[y:y+patch_size, x:x+patch_size]
+    patch_ch0 = mip_ch0[y:y+patch_size, x:x+patch_size]
+
+    # === Segment cells using CellSAM ===
+    mask, _, _ = segment_cellular_image(patch_ch1, device='cuda')
+    cell_count = np.max(mask)  # Assumes mask is labeled (1...N)
+
+    # === Measure intensity from Channel 0 in segmented regions ===
+    total_intensity = np.sum(patch_ch0[mask > 0])
+
+    # === Save segmentation mask ===
+    mask_filename = f"{masks_dir}/mask_{patch_index}_y{y}_x{x}.tiff"
+    tifffile.imwrite(mask_filename, mask.astype(np.uint8))
+
+    # === Visualize and display segmentation ===
+    fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+    axs[0].imshow(patch_ch1, cmap='gray')
+    axs[0].set_title(f'Patch {patch_index} - Channel 1')
+
+    axs[1].imshow(mask, cmap='gray')
+    axs[1].set_title('Mask')
+
+    axs[2].imshow(patch_ch0, cmap='gray')
+    axs[2].imshow(mask, cmap='jet', alpha=0.3)
+    axs[2].set_title('Overlay on Channel 0')
+
+    for ax in axs:
+        ax.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+    # === Record Results ===
+    results.append({
+        "Patch_Index": patch_index,
+        "Patch_TopLeft_X": x,
+        "Patch_TopLeft_Y": y,
+        "Width": patch_size,
+        "Height": patch_size,
+        "Total_Intensity_Ch0": total_intensity,
+        "Cell_Count": cell_count,
+        "Mask_File": mask_filename
+    })
+
+    patch_index += 1
+
+# === Save Results to Excel ===
+df = pd.DataFrame(results)
+df.to_excel("patch.xlsx", index=False)
+
+print("✅ Analysis complete. Excel saved, masks written, patches displayed.")
