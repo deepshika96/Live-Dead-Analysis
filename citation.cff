@@ -1,0 +1,19 @@
+
+cff-version: 1.2.0
+title: LiveDeadAnalysis
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Deepshika
+    family-names: Arasu
+    email: deepshika96@gmail.com
+    affiliation: University Of Barcelona
+identifiers:
+  - type: url
+    value: 'https://github.com/deepshika96/Live-Dead-Analysis'
+abstract: >-
+  Performs Live Dead analysis on 3D lif images-
+  approximation treats images as 2D.
+license: MIT-0
