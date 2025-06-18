@@ -1,0 +1,8 @@
+numpy
+pandas
+matplotlib
+tifffile
+scikit-image
+readlif
+ipywidgets
+cellSAM
