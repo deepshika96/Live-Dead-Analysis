@@ -1,0 +1,152 @@
+"""
+Stain Area Coverage Analysis from Leica .LIF Files
+--------------------------------------------------
+
+This script calculates area coverage and intensity of DAPI (channel 1) and 
+Caspase 3 (channel 0) in multiple z-stacks stored in a .lif file. The results 
+are exported to an Excel file and individual mask overlays are saved as images.
+
+Steps:
+- Load LIF z-stack and compute MIP for each channel
+- Randomly select non-overlapping patches
+- Apply Otsu threshold to compute binary masks
+- Measure stain area (µm²) and intensity
+- Save masks and RGB overlays for visualization
+- Export results to Excel
+
+Author: Deepshika Arasu
+Date: 2025-05-15
+"""
+
+import os
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import tifffile
+import shutil
+from skimage.filters import threshold_otsu
+from readlif.reader import LifFile
+
+# === Constants ===
+PIXELS_PER_UM = 1.8  # Micron per pixel scaling (depends on your Microscope)
+PATCH_SIZE = 250     # Patch size in pixels
+
+# === Paths ===
+lif_path = "/kaggle/input/6e-files/MS3aBP3a-5e-6e.lif"
+output_dir = "/kaggle/working/250-MS3aBP3a-stain_area_analysis"
+mask_dir = os.path.join(output_dir, "masks")
+overlay_dir = os.path.join(output_dir, "overlays")
+
+os.makedirs(mask_dir, exist_ok=True)
+os.makedirs(overlay_dir, exist_ok=True)
+
+# === Initialize results list ===
+results = []
+
+# === Load LIF File ===
+lif_file = LifFile(lif_path)
+all_images = [image for image in lif_file.get_iter_image()]
+print(f"🔍 Found {len(all_images)} image series in LIF file.")
+
+# === Process each image series ===
+for series_idx, image in enumerate(all_images):
+    series_name = lif_file.image_list[series_idx]["name"]
+    z_dim = image.dims.z
+    height, width = image.dims.y, image.dims.x
+    available_channels = []
+
+    # Check for valid channels (0, 1, 2)
+    for c in range(3):
+        try:
+            _ = np.array(image.get_frame(t=0, c=c, z=0))
+            available_channels.append(c)
+        except Exception:
+            continue
+
+    print(f"✅ Series {series_idx}: Detected {len(available_channels)} valid channels - {available_channels}")
+
+    if 0 in available_channels and 1 in available_channels:
+        # === Max-Intensity Projection Function ===
+        def compute_mip(channel):
+            z_stack = [np.array(image.get_frame(t=0, c=channel, z=z)) for z in range(z_dim)]
+            return np.max(np.stack(z_stack), axis=0)
+
+        # Compute MIPs for Caspase and DAPI
+        mip_ch0 = compute_mip(0)  # Caspase
+        mip_ch1 = compute_mip(1)  # DAPI
+
+        # === Random Patch Selection (non-overlapping) ===
+        selected_coords = []
+        attempts = 0
+        max_patches = 10
+
+        while len(selected_coords) < max_patches and attempts < 100:
+            x = random.randint(0, width - PATCH_SIZE)
+            y = random.randint(0, height - PATCH_SIZE)
+            overlap = any(abs(x - px) < PATCH_SIZE and abs(y - py) < PATCH_SIZE for px, py in selected_coords)
+            if not overlap:
+                selected_coords.append((x, y))
+            attempts += 1
+
+        # === Patch Analysis ===
+        for patch_index, (x, y) in enumerate(selected_coords, start=1):
+            patch_ch0 = mip_ch0[y:y+PATCH_SIZE, x:x+PATCH_SIZE]
+            patch_ch1 = mip_ch1[y:y+PATCH_SIZE, x:x+PATCH_SIZE]
+
+            # Thresholding
+            thresh_casp = threshold_otsu(patch_ch0)
+            thresh_dapi = threshold_otsu(patch_ch1)
+            mask_casp = patch_ch0 > thresh_casp
+            mask_dapi = patch_ch1 > thresh_dapi
+
+            # Area calculation (in µm²)
+            area_casp = np.sum(mask_casp) / (PIXELS_PER_UM ** 2)
+            area_dapi = np.sum(mask_dapi) / (PIXELS_PER_UM ** 2)
+
+            # Intensity calculation
+            intensity_casp = np.sum(patch_ch0[mask_casp])
+            intensity_dapi = np.sum(patch_ch1[mask_dapi])
+
+            # === Save Masks ===
+            dapi_mask_path = os.path.join(mask_dir, f"dapi_mask_s{series_idx}_p{patch_index}.tif")
+            casp_mask_path = os.path.join(mask_dir, f"casp_mask_s{series_idx}_p{patch_index}.tif")
+            tifffile.imwrite(dapi_mask_path, mask_dapi.astype(np.uint8))
+            tifffile.imwrite(casp_mask_path, mask_casp.astype(np.uint8))
+
+            # === Save RGB Overlay (R: Caspase, B: DAPI) ===
+            overlay = np.stack([
+                np.clip(patch_ch0, 0, 255).astype(np.uint8),  # Red
+                np.zeros_like(patch_ch0, dtype=np.uint8),    # Green
+                np.clip(patch_ch1, 0, 255).astype(np.uint8)   # Blue
+            ], axis=-1)
+            overlay_path = os.path.join(overlay_dir, f"overlay_s{series_idx}_p{patch_index}.png")
+            plt.imsave(overlay_path, overlay)
+
+            # === Log Results ===
+            results.append({
+                "LIF_File": os.path.basename(lif_path),
+                "Series_Index": series_idx,
+                "Series_Name": series_name,
+                "Patch_Index": patch_index,
+                "TopLeft_X": x,
+                "TopLeft_Y": y,
+                "DAPI_Area_um2": area_dapi,
+                "Caspase_Area_um2": area_casp,
+                "DAPI_Total_Intensity": intensity_dapi,
+                "Caspase_Total_Intensity": intensity_casp,
+                "DAPI_Mask_File": dapi_mask_path,
+                "Caspase_Mask_File": casp_mask_path,
+                "Overlay_Image": overlay_path
+            })
+    else:
+        print(f"❌ Skipping series {series_idx} due to missing required channels.")
+        continue
+
+# === Save Excel Summary ===
+df = pd.DataFrame(results)
+excel_path = os.path.join(output_dir, "analysisClCas3Staining.xlsx")
+df.to_excel(excel_path, index=False)
+print(f"📊 Excel summary saved to: {excel_path}")
+
+
